@@ -81,6 +81,7 @@ import jax.interpreters.partial_eval as pe
 import jax.numpy as np
 from jax.scipy.special import erf
 from jax.tree_util import tree_map, tree_flatten, tree_unflatten
+from jax.nn import initializers
 from neural_tangents.utils import utils
 from neural_tangents.utils.kernel import Kernel
 from neural_tangents.utils.kernel import Marginalisation as M
@@ -431,8 +432,9 @@ def _inputs_to_kernel(x1,
                                 'got spec = %s.' % spec)
     channel_axis = spec.index('C') if spec else x1.ndim - 1
 
-  # TODO: Think more about dtype automatic vs manual dtype promotion.
-  x1 = x1.astype(np.float64)
+  # TODO(schsam, romann): Think more about dtype automatic vs manual dtype
+  # promotion.
+  # x1 = x1.astype(np.float64)
   var1 = _get_variance(x1, marginal, batch_axis, channel_axis)
   x1_is_x2 = utils.x1_is_x2(x1, x2, eps=eps)
 
@@ -453,7 +455,7 @@ def _inputs_to_kernel(x1,
                        ' got %s and %s.' %
                        (str(x1.shape), str(x2.shape)))
 
-    x2 = x2.astype(np.float64)
+    # x2 = x2.astype(np.float64)
     var2 = _get_variance(x2, marginal, batch_axis, channel_axis)
 
   nngp = _get_covariance(x1, x2, cross, batch_axis, channel_axis)
@@ -635,11 +637,17 @@ def _ab_relu(x, a, b, **kwargs):
 def _erf(x, **kwargs):
   return erf(x)
 
+def _sin(x, **kwargs):
+  return np.sin(x)
+
 
 @_layer
 def Erf(do_backprop=False):
   return _elementwise(_erf, do_backprop=do_backprop)
 
+@_layer
+def Sin(do_backprop=False):
+  return _elementwise(_sin, do_backprop=do_backprop)
 
 @_layer
 def Relu(do_backprop=False, do_stabilize=False):
@@ -1024,6 +1032,23 @@ def Dense(out_dim,
   setattr(kernel_fn, _INPUT_REQ, {'marginal': M.OVER_ALL,
                                   'cross': M.OVER_ALL,
                                   'spec': spec})
+  return init_fn, apply_fn, kernel_fn
+
+
+@_layer
+def BatchNorm(axis=(0, 1, 2), epsilon=1e-5, center=True, scale=True,
+              beta_init=initializers.zeros, gamma_init=initializers.ones):
+  init_fn, apply_fn = ostax.BatchNorm(axis, epsilon, center, scale, beta_init, gamma_init)
+  def kernel_fn(kernels):
+    raise NotImplementedError("BatchNorm kernel not implemented")
+  return init_fn, apply_fn, kernel_fn
+
+
+@_layer
+def MaxPool(window_shape, strides=None, padding='VALID', spec=None):
+  init_fn, apply_fn = ostax.MaxPool(window_shape, strides, padding, spec)
+  def kernel_fn(kernels):
+    raise NotImplementedError("MaxPool kernel not implemented")
   return init_fn, apply_fn, kernel_fn
 
 
