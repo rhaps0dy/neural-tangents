@@ -461,9 +461,10 @@ def _inputs_to_kernel(x1,
   is_gaussian = False
   is_height_width = True
   is_input = True
+  var_slices = None
 
   return Kernel(var1, nngp, var2, ntk, is_gaussian, is_height_width,
-                marginal, cross, x1.shape, x2.shape, x1_is_x2, is_input)
+                marginal, cross, x1.shape, x2.shape, x1_is_x2, is_input, var_slices)
 
 
 def _propagate_shape(init_fn, shape):
@@ -714,7 +715,7 @@ def _get_dimensionwise_marg_var(var, marginal):
   return sqnorms
 
 
-def _get_normalising_prod(var1, var2, marginal, axis=()):
+def _get_normalising_prod(var1, var2, marginal, var_slices, axis=()):
   """Returns three tensors, `prod11`, `prod12` and `prod22` which contain
   products of marginal variances of `var1`, `nngp` and `var2` respectively.
 
@@ -745,7 +746,11 @@ def _get_normalising_prod(var1, var2, marginal, axis=()):
     else:
       sqnorms2 = np.mean(sqnorms2, axis=axis, keepdims=True)
 
-    prod12 = np.expand_dims(sqnorms1, 1) * np.expand_dims(sqnorms2, 0)
+    if var_slices is None:
+      prod12 = np.expand_dims(sqnorms1, 1) * np.expand_dims(sqnorms2, 0)
+    else:
+      i1, j1, i2, j2 = var_slices
+      prod12 = np.expand_dims(sqnorms1[..., i1, j1], 1) * np.expand_dims(sqnorms2[..., i2, j2], 0)
     prod11 = sqnorms1**2.0
     prod22 = sqnorms2**2.0 if not same_input else prod11
   elif marginal in (M.OVER_POINTS, M.NO):
@@ -762,7 +767,11 @@ def _get_normalising_prod(var1, var2, marginal, axis=()):
       sqnorms2 = _get_dimensionwise_marg_var(var2, marginal)
       sqnorms2 = np.mean(sqnorms2, axis=axis, keepdims=True)
 
-    prod12 = outer_prod_full(sqnorms1, sqnorms2)
+    if var_slices is None:
+      prod12 = outer_prod_full(sqnorms1, sqnorms2)
+    else:
+      i1, j1, i2, j2 = var_slices
+      prod12 = outer_prod_full(sqnorms1[..., i1, j1], sqnorms2[..., i2, j2])
 
     if marginal == M.OVER_POINTS:
       def outer_prod_pix(sqnorms1, sqnorms2):
@@ -812,7 +821,7 @@ def _transform_kernels_ab_relu(kernels, a, b, do_backprop, do_stabilize):
     if var2 is not None:
       var2 /= factor
 
-  prod11, prod12, prod22 = _get_normalising_prod(var1, var2, marginal)
+  prod11, prod12, prod22 = _get_normalising_prod(var1, var2, marginal, kernels.var_slices)
   nngp, ntk = _get_ab_relu_kernel(nngp, prod12, a, b, do_backprop, ntk=ntk)
   if do_stabilize:
     nngp *= factor
@@ -859,7 +868,7 @@ def _transform_kernels_erf(kernels, do_backprop):
   _var2_denom = None if var2 is None else 1 + 2 * var2
 
   prod11, prod12, prod22 = _get_normalising_prod(
-      _var1_denom, _var2_denom, marginal)
+      _var1_denom, _var2_denom, marginal, kernels.var_slices)
   nngp, ntk = _get_erf_kernel(nngp, prod12, do_backprop, ntk=ntk)
 
   if marginal in (M.OVER_ALL, M.OVER_PIXELS):
@@ -1173,7 +1182,7 @@ def _fan_in_kernel_fn(kernels, axis, spec):
 
   return Kernel(*(
       kers + (is_gaussian, is_height_width, marginal, cross, None, None,
-              kernels[0].x1_is_x2, kernels[0].is_input)))
+              kernels[0].x1_is_x2, kernels[0].is_input, kernels[0].var_slices)))
 
 
 def _flip_height_width(kernels):
@@ -2309,7 +2318,7 @@ def LayerNorm(axis=-1, eps=1e-12, spec=None):
 
     prod11, prod12, prod22 = _get_normalising_prod(
         eps + var1, var2 if var2 is None else eps + var2,
-        marginal, axis=kernel_axis)
+        marginal, kernels.var_slices, axis=kernel_axis)
     nngp /= np.sqrt(prod12)
     if _is_array(ntk):
       ntk /= np.sqrt(prod12)
