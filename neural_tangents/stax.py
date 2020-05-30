@@ -84,6 +84,7 @@ from jax.tree_util import tree_map, tree_flatten, tree_unflatten
 from neural_tangents.utils import utils
 from neural_tangents.utils.kernel import Kernel
 from neural_tangents.utils.kernel import Marginalisation as M
+from neural_tangents.gather_rolled_idx import gather_rolled_idx
 
 
 _CONV_QAB_DIMENSION_NUMBERS = ('NCHW', 'HWIO', 'NCHW')
@@ -461,10 +462,11 @@ def _inputs_to_kernel(x1,
   is_gaussian = False
   is_height_width = True
   is_input = True
-  var_slices = None
+  var_start_idx = None
+  var_mask = None
 
   return Kernel(var1, nngp, var2, ntk, is_gaussian, is_height_width,
-                marginal, cross, x1.shape, x2.shape, x1_is_x2, is_input, var_slices)
+                marginal, cross, x1.shape, x2.shape, x1_is_x2, is_input, var_start_idx, var_mask)
 
 
 def _propagate_shape(init_fn, shape):
@@ -715,7 +717,7 @@ def _get_dimensionwise_marg_var(var, marginal):
   return sqnorms
 
 
-def _get_normalising_prod(var1, var2, marginal, var_slices, axis=()):
+def _get_normalising_prod(var1, var2, marginal, var_start_idx, var_mask, axis=()):
   """Returns three tensors, `prod11`, `prod12` and `prod22` which contain
   products of marginal variances of `var1`, `nngp` and `var2` respectively.
 
@@ -746,11 +748,13 @@ def _get_normalising_prod(var1, var2, marginal, var_slices, axis=()):
     else:
       sqnorms2 = np.mean(sqnorms2, axis=axis, keepdims=True)
 
-    if var_slices is None:
+    if var_start_idx is None:
       prod12 = np.expand_dims(sqnorms1, 1) * np.expand_dims(sqnorms2, 0)
-    else:
-      i1, j1, i2, j2 = var_slices
-      prod12 = np.expand_dims(sqnorms1[..., i1, j1], 1) * np.expand_dims(sqnorms2[..., i2, j2], 0)
+    elif marginal == M.OVER_PIXELS:
+      cut_sqnorms1 = gather_rolled_idx(sqnorms1, var_start_idx[0], fillvalue=1.)
+      cut_sqnorms2 = gather_rolled_idx(sqnorms2, var_start_idx[1], fillvalue=1.)
+      prod12 = np.transpose(cut_sqnorms1, (1, 0, 2, 3)) * cut_sqnorms2
+
     prod11 = sqnorms1**2.0
     prod22 = sqnorms2**2.0 if not same_input else prod11
   elif marginal in (M.OVER_POINTS, M.NO):
@@ -767,12 +771,7 @@ def _get_normalising_prod(var1, var2, marginal, var_slices, axis=()):
       sqnorms2 = _get_dimensionwise_marg_var(var2, marginal)
       sqnorms2 = np.mean(sqnorms2, axis=axis, keepdims=True)
 
-    if var_slices is None:
-      prod12 = outer_prod_full(sqnorms1, sqnorms2)
-    else:
-      i1, j1, i2, j2 = var_slices
-      prod12 = outer_prod_full(sqnorms1[..., i1, j1], sqnorms2[..., i2, j2])
-
+    prod12 = outer_prod_full(sqnorms1, sqnorms2)
     if marginal == M.OVER_POINTS:
       def outer_prod_pix(sqnorms1, sqnorms2):
         sqnorms1 = sqnorms1[:, :, None, :, None]
@@ -821,10 +820,12 @@ def _transform_kernels_ab_relu(kernels, a, b, do_backprop, do_stabilize):
     if var2 is not None:
       var2 /= factor
 
-  prod11, prod12, prod22 = _get_normalising_prod(var1, var2, marginal, kernels.var_slices)
+  prod11, prod12, prod22 = _get_normalising_prod(var1, var2, marginal, kernels.var_start_idx, kernels.var_mask)
   nngp, ntk = _get_ab_relu_kernel(nngp, prod12, a, b, do_backprop, ntk=ntk)
   if do_stabilize:
     nngp *= factor
+  if kernels.var_mask is not None:
+    nngp *= kernels.var_mask
 
   if marginal in (M.OVER_ALL, M.OVER_PIXELS):
     var1 *= (a**2 + b**2) / 2
@@ -868,8 +869,10 @@ def _transform_kernels_erf(kernels, do_backprop):
   _var2_denom = None if var2 is None else 1 + 2 * var2
 
   prod11, prod12, prod22 = _get_normalising_prod(
-      _var1_denom, _var2_denom, marginal, kernels.var_slices)
+      _var1_denom, _var2_denom, marginal, kernels.var_start_idx, kernels.var_mask)
   nngp, ntk = _get_erf_kernel(nngp, prod12, do_backprop, ntk=ntk)
+  if kernels.var_mask is not None:
+    nngp *= kernels.var_mask
 
   if marginal in (M.OVER_ALL, M.OVER_PIXELS):
     var1 = np.arcsin(2 * var1 / _var1_denom) * 2 / np.pi
@@ -1182,7 +1185,7 @@ def _fan_in_kernel_fn(kernels, axis, spec):
 
   return Kernel(*(
       kers + (is_gaussian, is_height_width, marginal, cross, None, None,
-              kernels[0].x1_is_x2, kernels[0].is_input, kernels[0].var_slices)))
+              kernels[0].x1_is_x2, kernels[0].is_input, kernels[0].var_start_idx, kernels[0].var_mask)))
 
 
 def _flip_height_width(kernels):
@@ -1616,9 +1619,9 @@ def GeneralConv(dimension_numbers,
 
   def kernel_fn(kernels):
     """Compute the transformed kernels after a conv layer."""
-    var1, nngp, var2, ntk, is_height_width, marginal, cross = (
+    var1, nngp, var2, ntk, is_height_width, marginal, cross, var_start_idx, var_mask = (
         kernels.var1, kernels.nngp, kernels.var2, kernels.ntk,
-        kernels.is_height_width, kernels.marginal, kernels.cross)
+        kernels.is_height_width, kernels.marginal, kernels.cross, kernels.var_start_idx, kernels.var_mask)
 
     input_spec = tuple(c for c in dimension_numbers[0] if c not in ('N', 'C'))
     conv_spec = tuple(c for c in dimension_numbers[1] if c not in ('I', 'O'))
@@ -1688,10 +1691,16 @@ def GeneralConv(dimension_numbers,
             W_std**2 * conv_nngp_unscaled(ntk))
       nngp = _affine(nngp_unscaled, W_std, b_std)
 
+    if var_start_idx is not None:
+      assert len(strides) == 2, "larger convolutions not implemented"
+      if strides[0] != 1 or strides[1] != 1:
+        var_start_idx = (var_start_idx[0] // strides[0], var_start_idx[1] // strides[1])
+        var_mask = var_mask[..., ::strides[0], ::strides[1]]
+
     return kernels._replace(
         var1=var1, nngp=nngp, var2=var2, ntk=ntk, is_gaussian=True,
         is_height_width=is_height_width, marginal=marginal, cross=cross,
-        is_input=False)
+        is_input=False, var_start_idx=var_start_idx, var_mask=var_mask)
 
   setattr(kernel_fn, _INPUT_REQ, {'marginal': M.OVER_PIXELS,
                                   'cross': M.OVER_PIXELS,
@@ -2318,7 +2327,7 @@ def LayerNorm(axis=-1, eps=1e-12, spec=None):
 
     prod11, prod12, prod22 = _get_normalising_prod(
         eps + var1, var2 if var2 is None else eps + var2,
-        marginal, kernels.var_slices, axis=kernel_axis)
+        marginal, kernels.var_start_idx, kernels.var_mask, axis=kernel_axis)
     nngp /= np.sqrt(prod12)
     if _is_array(ntk):
       ntk /= np.sqrt(prod12)

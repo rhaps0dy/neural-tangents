@@ -60,7 +60,7 @@ class Marginalisation(enum.IntEnum):
 class Kernel(
     collections.namedtuple('Kernel', [
         'var1', 'nngp', 'var2', 'ntk', 'is_gaussian', 'is_height_width',
-        'marginal', 'cross', 'shape1', 'shape2', 'x1_is_x2', 'is_input', 'var_slices',
+        'marginal', 'cross', 'shape1', 'shape2', 'x1_is_x2', 'is_input', 'var_start_idx', 'var_mask',
     ])):
   """A tuple containing information about the analytic NTK and NNGP of a model.
 
@@ -103,7 +103,7 @@ class Kernel(
   """
 
   def __new__(cls, var1, nngp, var2, ntk, is_gaussian, is_height_width,
-              marginal, cross, shape1, shape2, x1_is_x2, is_input, var_slices):
+              marginal, cross, shape1, shape2, x1_is_x2, is_input, var_start_idx, var_mask):
     """Returns a `Kernel`.
 
     Args:
@@ -158,7 +158,7 @@ class Kernel(
     return super(Kernel, cls).__new__(
         cls, var1, nngp, var2, ntk, is_gaussian,
         is_height_width, marginal, cross, shape1, shape2, x1_is_x2,
-        is_input, var_slices)
+        is_input, var_start_idx, var_mask)
 
   def _replace(self, **kwargs):
     """`namedtuple._replace` with casting `Marginalisation` to `int`s."""
