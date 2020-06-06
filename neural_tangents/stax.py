@@ -826,6 +826,8 @@ def _transform_kernels_ab_relu(kernels, a, b, do_backprop, do_stabilize):
     nngp *= factor
   if kernels.var_mask is not None:
     nngp *= kernels.var_mask
+    if ntk is not None:
+      ntk *= kernels.var_mask
 
   if marginal in (M.OVER_ALL, M.OVER_PIXELS):
     var1 *= (a**2 + b**2) / 2
@@ -873,6 +875,8 @@ def _transform_kernels_erf(kernels, do_backprop):
   nngp, ntk = _get_erf_kernel(nngp, prod12, do_backprop, ntk=ntk)
   if kernels.var_mask is not None:
     nngp *= kernels.var_mask
+    if ntk is not None:
+      ntk *= kernels.var_mask
 
   if marginal in (M.OVER_ALL, M.OVER_PIXELS):
     var1 = np.arcsin(2 * var1 / _var1_denom) * 2 / np.pi
